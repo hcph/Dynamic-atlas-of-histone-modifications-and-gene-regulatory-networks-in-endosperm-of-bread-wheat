@@ -1,0 +1,154 @@
+cd /public/home/chaohe/prgwas
+module load Perl/5.26.2
+perl modifi_chromosomein_vcf.pl /public/home/stbi/task/pr_240425/sample_snp_chr_DP_het_maf0.05_geno0.2_infofree.240426.recode.vcf hc.vcf
+#调取要用的材料的基因型文件
+module load plink/1.9
+plink --vcf  hc.vcf --make-bed  --out V1_snp
+plink --bfile V1_snp --keep keep.txt --make-bed --out HC_genotype
+#PCA
+plink --bfile HC_genotype --pca 50 --out total_pca
+module load EIGENSOFT/6.1.4
+twstats -t twtable -i total_pca.eigenval -o hc_pca_number
+#R
+library(gdsfmt)
+library(SNPRelate)
+# 输入 PLINK 文件路径
+bed.fn <- "HC_genotype.bed"
+fam.fn <- "HC_genotype.fam"
+bim.fn <- "HC_genotype.bim"
+# 将 PLINK 文件转为 GDS 文件
+snpgdsBED2GDS(bed.fn, fam.fn, bim.fn, "test.gds")
+# 读取 GDS 文件
+genofile <- snpgdsOpen("test.gds")
+# 根据 LD 过滤 SNPs，阈值根据需要设定
+set.seed(1000)
+snpset <- snpgdsLDpruning(genofile, ld.threshold=0.2)
+# 选择 SNP pruning 后要保留的 SNP
+snpset.id <- unlist(unname(snpset))
+# 计算 PCA，num.thread 是并行的线程数
+pca <- snpgdsPCA(genofile, snp.id=snpset.id, num.thread=10)
+# 以百分比形式输出 variance proportion
+print(pca$varprop*100)
+library(ggplot2)
+K= 30
+pdf("total_scallaterplot.pdf")
+qplot(x = 1:K, y = (pca$varprop[1:K]), col = "red", xlab = "PC", ylab = "Proportion of explained variance") + 
+  geom_line() + guides(colour = FALSE) +
+  ggtitle(paste("Scree Plot - K =", K))
+dev.off()
+#生成协变量文件	 
+awk '{print $1,$2,$3,$4,$5,$6,$7,$8}' total_pca.eigenvec >pca_cov_pc6.txt
+#混合线性模型
+module load Fastlmm/v0.2.32
+for i in tgw gw gl glgw;
+do
+mkdir $i
+done
+for i in tgw gw gl glgw;
+do
+cd /public/home/chaohe/prgwas/$i
+bsub  -J $i -n 2 -o $i.out -e $i.err -q smp -m "s005" -R "rusage[mem=500GB]"  "fastlmmc -bfile ../HC_genotype -bfilesim ../HC_genotype  -pheno ../"$i".txt -covar ../pca_cov_pc6.txt -mpheno 1 -out "$i"_fastlmmR2"
+done
+one
+#绘制曼哈顿图
+for i in tgw gw gl glgw;
+do
+cd /public/home/chaohe/prgwas/$i
+awk '{if ($5 < 1e-5) print $0}' "$i"_fastlmmR1 >"$i"_sig.fastlmm
+done
+
+for i in tgw gw gl glgw;
+do
+cd /public/home/chaohe/prgwas/$i
+awk '{print $1"\t"$2"\t"$4"\t"$5}' "$i"_fastlmmR1 >"$i"_p.txt
+done
+#R
+library(CMplot)
+name = c("gw", "gl", "glgw","tgw")
+for (i in name) {
+  setwd(paste0("/public/home/chaohe/prgwas/",i))
+  dat <- read.table(paste0("/public/home/chaohe/prgwas/",i,"/",i,"_p.txt"),sep="\t",header=T)
+  colnames(dat) <-c("SNP", "CHR", "BP", "P")
+  CMplot(dat,plot.type="q",threshold=0.05,file="jpg")
+  #CMplot(dat,plot.type="q",threshold=0.05,file="pdf",file.name=paste0(i,"_qqR1"))
+  CMplot(dat,plot.type="m",threshold=c(1e-5),threshold.col='black', threshold.lty=c(1,2),threshold.lwd=c(1,1),file="jpg",file.name=paste0(i,"_ManhtnR1"), amplify=T, signal.cex=c(1,1),signal.pch=c(20,20),signal.col=c("red","orange"))
+  #CMplot(dat,plot.type="m",threshold=c(1e-5),threshold.col='black', threshold.lty=c(1,2),threshold.lwd=c(1,1),file="pdf",file.name=paste0(i,"_ManhtnR1"), amplify=T, signal.cex=c(1,1),signal.pch=c(20,20),signal.col=c("red","orange"))
+}
+#提交集群任务
+module load R/4.0.0
+bsub  -J memhan -n 2 -o memhan.out -e memhan.err -q smp -R "rusage[mem=400GB]"  "Rscript memhan.r"
+
+###找到候选基因
+setwd("D:/胚乳/大修/GWAS")
+name <- c("gl","gw","glgw","tgw")
+y <- data.frame()
+for (i in name) {
+  x <- read.table(paste0(i,"_sig.fastlmm"))
+  x$type <- rep(i,nrow(x))
+  y <- rbind(y,x)
+}
+head(y)
+write.csv(y,"gwas_sig.csv",row.names = F)
+y <- y[,c(2,4,4,5,1,24)]
+write.table(y,"gwas_sig.bed",row.names = F,col.names = F,sep="\t",quote = F)
+
+####leading SNP序列调取leading_snp
+#最终方法##########用plink确定LD block
+cd /public/home/chaohe/prgwas
+awk '{print $5}' gwas_sig.bed | sort | uniq >snp.txt
+plink --bfile HC_genotype --show-tags snp.txt  --list-all --tag-r2 0.5 --out sig_snp_tag.txt
+#合并生成qtl
+awk -v OFS="\t" '{print $2,$5,$6,$1}'  sig_snp_tag.txt.tags.list >sig_snp_tag.bed
+sort -k1,1 -k2n,2 sig_snp_tag.bed  | bedtools merge -i - -c 4 -o collapse >sig_snp_tag_merged.bed
+#R,snp的分析
+#snp的分析
+#调取leading SNP
+library(stringr)
+#setwd("D:/AG_幼穗/GWAS/PC6/")
+setwd("D:/胚乳/大修/GWAS")
+a <- read.table("sig_snp_tag_merged.bed")
+b <- str_split_fixed(as.character(a$V4),',',262)
+a <- cbind(a,b)
+library(tidygraph)
+library(tibble)
+a <- a %>% 
+  rownames_to_column(var = 'sample') %>% 
+  pivot_longer( cols =  c("1":"262"),
+                names_to = 'stage',
+                values_to = 'expr')
+a <- na.omit(a)
+a <- a[which(a$expr != ""),]
+head(a)
+#提取pvalue
+te <- read.csv("gwas_sig.csv")
+te <- te[,c(1,2,4,5,24)]
+te$expr <- te$V1
+head(te)
+tea <- merge(a,te,by="expr",all.x=TRUE)
+head(tea)
+tea <- tea[order(tea[,6],tea[,11]),]
+teaa <- tea[!duplicated(tea[,6]),]
+teaa <- teaa[,c(3,4,5,6,8,10,11,12)]
+colnames(teaa) <- c("chr","qtl_start","qtl_end","include-snp","leading_snp","leading_snp_position","P-value","trait")
+head(teaa)
+##triat可能有重复，需要都加上
+te$leading_snp <- te$expr
+teaaa <- merge(teaa,te,by="leading_snp",all=F)
+teaaa <- teaaa[,c(2,3,4,5,1,6,12,13)]
+head(teaaa)
+d <- data.frame("chr"=c(1:21),"CHR"=c("1A","1B","1D",
+                                      "2A","2B","2D",
+                                      "3A","3B","3D",
+                                      "4A","4B","4D",
+                                      "5A","5B","5D",
+                                      "6A","6B","6D",
+                                      "7A","7B","7D"))
+head(d)
+teaaad <- merge(teaaa,d,by="chr",all.x=TRUE)
+teaaad <- teaaad[,c(9,2:8)]
+head(teaaad)
+write.csv(teaaad,"leading_snp_qtl.csv",row.names=F)
+##调取qtl邻近基因
+write.table(teaaad,"leading_snp_qtl.bed",sep="\t",row.names=F)
+sed 's/^/chr&/g' -i leading_snp_qtl.bed
+bedtools closest -D ref -t all -mdb all -a leading_snp_qtl.bed -b /public/home/chaohe/db/geneR1.bed >QTL_gene.bed

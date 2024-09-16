@@ -1,0 +1,141 @@
+cd /public/home/xinwang/HC-tobias
+conda activate callpeak
+##Tn5 biad correct
+#merge bam
+cd /public/home/xinwang/HC-tobias
+cut -f 1 /public/home/tllu/HC-ATAC/meta/macs2.meta | uniq | tail -n 3 | while read i;
+do
+TOBIAS ATACorrect --bam /public/home/tllu/HC-ATAC/align/"$i"_rep0.bam \
+ --genome /public/home/chaohe/db/IWGSC_v1.fasta \
+ --peaks /public/home/tllu/HC-ATAC/final/"$i".peaks.bed  \
+ --outdir ATACorrect_"$i" --cores 8
+done
+
+#scorebigwig
+cd /public/home/xinwang/HC-tobias
+cut -f 1 /public/home/tllu/HC-ATAC/meta/macs2.meta | uniq | while read i;
+do
+TOBIAS FootprintScores --signal ATACorrect_"$i"/"$i"_rep0_corrected.bw \
+--regions /public/home/tllu/HC-ATAC/final/"$i".peaks.bed \
+--output "$i"_ATACorrect.bw --cores 8
+done
+
+##detect TF footprint
+#peak annotation
+cd /public/home/tllu/HC-ATAC/final
+cut -f 1 /public/home/tllu/HC-ATAC/meta/macs2.meta | uniq | while read i;
+do
+awk '{print $1"\t"$2"\t"$3"\t"$2+$10}' /public/home/tllu/HC-ATAC/final/"$i".peaks.bed |  bedtools closest -D ref -t all -mdb all -a - -b /public/home/chaohe/db/geneR1.bed >"$i".txt
+awk '{if($10=="-" && $11 >= 0) print $1"\t"$2"\t"$3"\t"$4"\t"$8"\t"$11"\t"$7-$4; else if($10=="-" && $11 <= 0) print $1"\t"$2"\t"$3"\t"$4"\t"$8"\t"$11"\t"$7-$4}' "$i".txt | uniq  >"$i".minu.txt
+awk '{if($10=="+" && $11 >= 0) print $1"\t"$2"\t"$3"\t"$4"\t"$8"\t"$11"\t"$4-$6; else if($10 =="+" && $11 < 0) print $1"\t"$2"\t"$3"\t"$4"\t"$8"\t"$11"\t"$4-$6}' "$i".txt | uniq >"$i".plus.txt
+cat "$i".minu.txt "$i".plus.txt >"$i"_gene.peaks.txt
+done
+###R module load R/4.0.0
+name <- c("4DAF","7DAF","14DAF","18DAF")
+for (i in name) {
+x<-read.table(paste0("/public/home/tllu/HC-ATAC/final/",i,"_gene.peaks.txt"))
+head(x)
+x$fz<-abs(x[,7])
+x<-x[order(x[,1],x[,4],x[,8]),]
+x<-x[!duplicated(x[,4]),]
+x<-x[,-8]
+x<-x[order(x[,1],x[,2],x[,7]),]
+genebody<-unique(x[which((x[,6]==0) & (x[,7]>1500)),])
+gene_downstream<-unique(x[which((x[,6] != 0) & (x[,7]>0)),])
+promoter <- unique(x[which(((x[,6]!=0) & (x[,7]>= -3000) & (x[,7] <= 0)) | ((x[,6]==0) & x[,7] <= 1500)),])
+intergeric <- unique(x[which((x[,6]!=0) & (x[,7]< -3000)),])
+genebody$type<-c(rep("genebody",nrow(genebody)))
+gene_downstream$type<-c(rep("gene_downstream",nrow(gene_downstream)))
+promoter$type<-c(rep("promoter",nrow(promoter)))
+intergeric$type<-c(rep("intergeric",nrow(intergeric)))
+T<-rbind(genebody, gene_downstream, promoter, intergeric)
+write.csv(T,paste0(i,"_gene_peaks.csv"),row.names=F)
+}
+#modify csv to tab sperate
+cd /public/home/tllu/HC-ATAC/final
+cut -f 1 /public/home/tllu/HC-ATAC/meta/macs2.meta | uniq | while read i;
+do
+mv "$i"_gene_peaks.csv "$i"_gene_peaks.bed
+done
+perl -p -i -e 's/,/\t/g' *_gene_peaks.bed
+perl -p -i -e 's/\"//g' *_gene_peaks.bed
+cut -f 1 /public/home/tllu/HC-ATAC/meta/macs2.meta | uniq | while read i;
+do
+cat "$i"_gene_peaks.bed | sed '1d' | sort -k1,1 -k2n,2 -o "$i"_gene_peaks.bed
+done
+
+#####BINDetect
+cd /public/home/xinwang/HC-tobias
+cut -f 1 /public/home/tllu/HC-ATAC/meta/macs2.meta | uniq | while read i;
+do
+bedtools closest -D ref -t all -mdb all -a /public/home/tllu/HC-ATAC/final/"$i"_gene_peaks.bed -b /public/home/tllu/HC-ATAC/final/"$i".peaks.bed | awk '{if($NF == 0) print $1"\t"$2"\t"$3"\t"$12"\t"$13"\t"$14"\t"$5"\t"$5}' >"$i"_gene_bindtect_peak.bed
+done
+cd /public/home/xinwang/HC-tobias
+cut -f 1 /public/home/tllu/HC-ATAC/meta/macs2.meta | uniq | while read i;
+do
+TOBIAS BINDetect --motifs \
+ /public/home/chaohe/ATAC/final/JASPAR2020_CORE_plants_non-redundant_pfms_jaspar.txt \
+ --signals "$i"_ATACorrect.bw \
+ --genome /public/home/chaohe/db/IWGSC_v1.fasta \
+ --peaks "$i"_gene_bindtect_peak.bed \
+ --peak_header /public/home/chaohe/ATAC/final/merged_peaks_annotated_header.txt \
+ --outdir "$i"_BINDetect_output \
+ --cond_names "$i"_BINDetect  --cores 8
+done
+
+#####network filtered
+cd /public/home/xinwang/HC-tobias/final_network
+name <- c("4DAF","7DAF","14DAF","18DAF")
+for (i in name) {
+  his <- read.csv("受组蛋白修饰调控的基因汇总R1.csv")
+  a1_symbol <- read.table(paste0("../",i,"_symb2id.txt"),header=T)
+  head(a1_symbol)
+  his_source <- merge(his,a1_symbol,by="source",all=F)
+  write.csv(his_source,paste0(i,"_network_filtered.csv"))
+}
+cat ../list.txt | while read i;
+do
+grep "$i" *_network_filtered.csv | grep ERF5 >>test1.txt
+done
+pre <- read.csv("单时期特异和前期后期高表达基因列表.csv")
+pre_1 <- pre[which(pre$cluster == 1 | pre$cluster == 12),c(1,6)]
+colnames(pre_1) <- c("source","cluster")
+d4 <- read.csv("4DAF_network_filtered.csv",row.names=1)
+d4_pre <- merge(d4,pre_1,by="source",all.x=F)
+d4_pre <- unique(d4_pre[,c(1,6,3,7)])
+head(d4_pre)
+write.csv(d4_pre,"d4_network_filteredR1.csv")
+#k7
+pre <- read.csv("单时期特异和前期后期高表达基因列表.csv")
+pre_2 <- pre[which(pre$cluster == 2 | pre$cluster == 12),c(1,6)]
+colnames(pre_2) <- c("source","cluster")
+d7 <- read.csv("7DAF_network_filtered.csv",row.names=1)
+d7_pre <- merge(d7,pre_2,by="source",all.x=F)
+d7_pre <- unique(d7_pre[,c(1,6,3,7)])
+head(d7_pre)
+write.csv(d7_pre,"d7_network_filteredR1.csv")
+$k14
+pre <- read.csv("单时期特异和前期后期高表达基因列表.csv")
+pre_3 <- pre[which(pre$cluster == 3 | pre$cluster == 34),c(1,6)]
+colnames(pre_3) <- c("source","cluster")
+d14 <- read.csv("14DAF_network_filtered.csv",row.names=1)
+d14_pre <- merge(d14,pre_3,by="source",all.x=F)
+d14_pre <- unique(d14_pre[,c(1,6,3,7)])
+head(d14_pre)
+write.csv(d14_pre,"d14_network_filteredR1.csv")
+#k18
+pre <- read.csv("单时期特异和前期后期高表达基因列表.csv")
+pre_4 <- pre[which(pre$cluster == 4 | pre$cluster == 34),c(1,6)]
+colnames(pre_4) <- c("source","cluster")
+d18 <- read.csv("18DAF_network_filtered.csv",row.names=1)
+d18_pre <- merge(d18,pre_4,by="source",all.x=F)
+d18_pre <- unique(d18_pre[,c(1,6,3,7)])
+head(d18_pre)
+write.csv(d18_pre,"d18_network_filteredR1.csv")
+#合并
+d4_pre$type <- rep("d4",nrow(d4_pre))
+d7_pre$type <- rep("d7",nrow(d7_pre))
+d14_pre$type <- rep("d14",nrow(d14_pre))
+d18_pre$type <- rep("d18",nrow(d18_pre))
+tot <- rbind(d4_pre,d7_pre,d14_pre,d18_pre)
+write.csv(tot,"link_total.csv")
